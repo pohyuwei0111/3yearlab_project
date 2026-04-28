@@ -1,1 +1,275 @@
-#testing
+#include <Wire.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <Adafruit_NeoPixel.h>
+#include <DHT20.h>
+#include <U8g2lib.h>
+
+// ================= WIFI =================
+const char* ssid = "YOUR_WIFI_NAME";
+const char* wifi_password = "YOUR_WIFI_PASSWORD";
+
+// ================= MQTT =================
+const char* mqtt_server = "f8bd7c23ad0947b29af58cb06c6d4fc3.s1.eu.hivemq.cloud";
+const int mqtt_port = 8883;
+const char* mqtt_user = "username";
+const char* mqtt_password = "password";
+const char* mqtt_topic = "aquaponic/data";
+
+// ================= PINS =================
+// XIAO ESP32C3 analog input pins
+#define DUST_PIN A0
+#define TURBIDITY_PIN A1
+
+// RGB LED strip pin
+#define RGB_PIN D2
+#define NUM_LEDS 30
+
+// ================= OBJECTS =================
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+DHT20 dht20;
+Adafruit_NeoPixel strip(NUM_LEDS, RGB_PIN, NEO_GRB + NEO_KHZ800);
+
+// OLED on XIAO Expansion Board
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+
+// ================= THRESHOLDS =================
+// Temperature
+float TEMP_DANGER_LOW = 20.0;
+float TEMP_WARN_LOW = 24.0;
+float TEMP_WARN_HIGH = 30.0;
+float TEMP_DANGER_HIGH = 33.0;
+
+// Humidity
+float HUM_DANGER_LOW = 40.0;
+float HUM_WARN_LOW = 50.0;
+float HUM_WARN_HIGH = 70.0;
+float HUM_DANGER_HIGH = 80.0;
+
+// Dust and turbidity are example ADC-based values
+int DUST_WARN = 1000;
+int DUST_DANGER = 2000;
+
+int TURB_WARN = 1000;
+int TURB_DANGER = 2000;
+
+// ================= COLORS =================
+uint32_t GREEN;
+uint32_t YELLOW;
+uint32_t RED;
+
+// ================= FUNCTIONS =================
+void setSegment(int startLED, int endLED, uint32_t color) {
+  for (int i = startLED; i <= endLED; i++) {
+    strip.setPixelColor(i, color);
+  }
+}
+
+uint32_t checkTemperature(float temp) {
+  if (temp < TEMP_DANGER_LOW || temp > TEMP_DANGER_HIGH) return RED;
+  else if (temp < TEMP_WARN_LOW || temp > TEMP_WARN_HIGH) return YELLOW;
+  else return GREEN;
+}
+
+uint32_t checkHumidity(float hum) {
+  if (hum < HUM_DANGER_LOW || hum > HUM_DANGER_HIGH) return RED;
+  else if (hum < HUM_WARN_LOW || hum > HUM_WARN_HIGH) return YELLOW;
+  else return GREEN;
+}
+
+uint32_t checkDust(int dust) {
+  if (dust > DUST_DANGER) return RED;
+  else if (dust > DUST_WARN) return YELLOW;
+  else return GREEN;
+}
+
+uint32_t checkTurbidity(int turbidity) {
+  if (turbidity > TURB_DANGER) return RED;
+  else if (turbidity > TURB_WARN) return YELLOW;
+  else return GREEN;
+}
+
+String getCorrectiveAction(float temp, float hum, int dust, int turbidity) {
+  String action = "";
+
+  if (temp < TEMP_DANGER_LOW) {
+    action += "Temp low: add heating. ";
+  } 
+  else if (temp < TEMP_WARN_LOW) {
+    action += "Temp slightly low: monitor/adjust heating. ";
+  } 
+  else if (temp > TEMP_DANGER_HIGH) {
+    action += "Temp high: increase cooling/ventilation. ";
+  } 
+  else if (temp > TEMP_WARN_HIGH) {
+    action += "Temp slightly high: improve ventilation. ";
+  }
+
+  if (hum < HUM_DANGER_LOW) {
+    action += "Humidity low: add humidifier/spray. ";
+  } 
+  else if (hum < HUM_WARN_LOW) {
+    action += "Humidity slightly low: monitor humidity. ";
+  } 
+  else if (hum > HUM_DANGER_HIGH) {
+    action += "Humidity high: increase ventilation/dehumidify. ";
+  } 
+  else if (hum > HUM_WARN_HIGH) {
+    action += "Humidity slightly high: improve airflow. ";
+  }
+
+  if (dust > DUST_DANGER) {
+    action += "Dust high: use air filter/clean area. ";
+  } 
+  else if (dust > DUST_WARN) {
+    action += "Dust warning: check air quality. ";
+  }
+
+  if (turbidity > TURB_DANGER) {
+    action += "Turbidity high: check water/filter. ";
+  } 
+  else if (turbidity > TURB_WARN) {
+    action += "Turbidity warning: monitor water clarity. ";
+  }
+
+  if (action == "") {
+    action = "Condition normal";
+  }
+
+  return action;
+}
+
+void displayOLED(float temp, float hum, int dust, int turbidity, String action) {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+
+  oled.setCursor(0, 10);
+  oled.print("Aquaponic Monitor");
+
+  oled.setCursor(0, 24);
+  oled.print("Temp: ");
+  oled.print(temp);
+  oled.print(" C");
+
+  oled.setCursor(0, 34);
+  oled.print("Hum : ");
+  oled.print(hum);
+  oled.print(" %");
+
+  oled.setCursor(0, 44);
+  oled.print("Dust: ");
+  oled.print(dust);
+
+  oled.setCursor(0, 54);
+  oled.print("Turb: ");
+  oled.print(turbidity);
+
+  oled.setCursor(0, 64);
+  oled.print(action.substring(0, 21));
+
+  oled.sendBuffer();
+}
+
+void connectWiFi() {
+  WiFi.begin(ssid, wifi_password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+}
+
+void reconnectMQTT() {
+  while (!client.connected()) {
+    if (client.connect("XIAO_ESP32C3_Aquaponic", mqtt_user, mqtt_password)) {
+      // connected
+    } else {
+      delay(2000);
+    }
+  }
+}
+
+void sendMQTT(float temp, float hum, int dust, int turbidity, String action) {
+  String payload = "{";
+  payload += "\"temperature\":" + String(temp, 2) + ",";
+  payload += "\"humidity\":" + String(hum, 2) + ",";
+  payload += "\"dust\":" + String(dust) + ",";
+  payload += "\"turbidity\":" + String(turbidity) + ",";
+  payload += "\"action\":\"" + action + "\"";
+  payload += "}";
+
+  client.publish(mqtt_topic, payload.c_str());
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+
+  Wire.begin();
+
+  dht20.begin();
+
+  oled.begin();
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 20, "System Starting...");
+  oled.sendBuffer();
+
+  strip.begin();
+  strip.show();
+
+  GREEN = strip.Color(0, 255, 0);
+  YELLOW = strip.Color(255, 150, 0);
+  RED = strip.Color(255, 0, 0);
+
+  connectWiFi();
+
+  espClient.setInsecure();   // For HiveMQ TLS without certificate
+  client.setServer(mqtt_server, mqtt_port);
+}
+
+// ================= LOOP =================
+void loop() {
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop();
+
+  dht20.read();
+
+  float temperature = dht20.getTemperature();
+  float humidity = dht20.getHumidity();
+
+  int dustValue = analogRead(DUST_PIN);
+  int turbidityValue = analogRead(TURBIDITY_PIN);
+
+  String action = getCorrectiveAction(temperature, humidity, dustValue, turbidityValue);
+
+  // Segment 1: LED 0-7 = Temperature
+  setSegment(0, 7, checkTemperature(temperature));
+
+  // Segment 2: LED 8-14 = Humidity
+  setSegment(8, 14, checkHumidity(humidity));
+
+  // Segment 3: LED 15-21 = Dust
+  setSegment(15, 21, checkDust(dustValue));
+
+  // Segment 4: LED 22-29 = Turbidity
+  setSegment(22, 29, checkTurbidity(turbidityValue));
+
+  strip.show();
+
+  displayOLED(temperature, humidity, dustValue, turbidityValue, action);
+
+  sendMQTT(temperature, humidity, dustValue, turbidityValue, action);
+
+  Serial.println("Data sent to MQTT:");
+  Serial.print("Temp: "); Serial.println(temperature);
+  Serial.print("Humidity: "); Serial.println(humidity);
+  Serial.print("Dust: "); Serial.println(dustValue);
+  Serial.print("Turbidity: "); Serial.println(turbidityValue);
+  Serial.print("Action: "); Serial.println(action);
+
+  delay(3000);
+}
