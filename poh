@@ -1,0 +1,184 @@
+#include <Adafruit_Sensor.h>
+#include <DHT_U.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ESP32Servo.h> 
+#include <FastLED.h> 
+
+// Defining Pins
+#define LED D0
+#define DHTPIN D1
+#define SERVO_PIN D2
+#define LED_PIN D3
+#define NUM_LEDS 16
+#define DUST_PIN D8 // Assuming analog sensor
+#define OLED_SDA D4
+#define OLED_SCL D5
+#define TURB D7     // Assuming analog sensor
+
+// DHT parameters
+#define DHTTYPE DHT22
+DHT_Unified dht(DHTPIN, DHTTYPE);
+uint32_t delayMS;
+float temp, hum;
+const long interval = 5000; // Increased to 5 seconds to prevent MQTT spam
+
+// Servo motor
+Servo servo;
+
+// WS2812 LED strip
+CRGB leds[NUM_LEDS];
+
+// Wi-Fi credentials
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+
+// MQTT broker details private
+const char* mqtt_broker = "96d3e4027caf4bef8208fd85b4556562.s1.eu.hivemq.cloud";
+const int mqtt_port = 8883;
+const char* mqtt_username = "helloworld";
+const char* mqtt_password = "Hello2world";
+const char* topic = "Tempdata"; // Publish topic
+
+// Create instances
+WiFiClientSecure wifiClient;
+PubSubClient mqttClient(wifiClient);
+
+// Variables for timing
+long previous_time = 0;
+
+// Callback function to handler incoming messages
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  String message;
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.println(message);
+
+  if (String(topic) == "lights") {
+    if (message == "ON") {
+      digitalWrite(LED, HIGH);
+    } else {
+      digitalWrite(LED, LOW);
+    }
+  }
+  else if (String(topic) == "servo") {
+    int degree = message.toInt();
+    servo.write(degree);
+  }
+  else if (String(topic) == "lights/neopixel") {
+    int red, green, blue;
+    sscanf(message.c_str(), "%d,%d,%d", &red, &green, &blue); 
+    fill_solid(leds, NUM_LEDS, CRGB(red, green, blue)); 
+    FastLED.show(); 
+  }
+}
+
+void setupMQTT(){
+  mqttClient.setServer(mqtt_broker, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+}
+
+void reconnect(){
+  while (!mqttClient.connected()){
+    Serial.println("Reconnecting to MQTT Broker...");
+    String clientId = "ESP32Client-";
+    clientId += String(random(0xffff),HEX);
+
+    if (mqttClient.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
+      Serial.println("Connected to MQTT Broker.");
+      mqttClient.subscribe(topic);
+      mqttClient.subscribe("lights");
+      mqttClient.subscribe("servo");
+      mqttClient.subscribe("lights/neopixel");
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
+  
+  pinMode(DUST_PIN, INPUT);
+  pinMode(TURB, INPUT);
+  
+  dht.begin();
+
+  servo.attach(SERVO_PIN, 500, 2400);
+  servo.write(0);
+
+  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  wifiClient.setInsecure(); 
+  setupMQTT();
+}
+
+void loop() {
+  if (!mqttClient.connected()){
+    reconnect();
+  }
+  mqttClient.loop();
+
+  long now = millis();
+  if (now - previous_time > interval) { 
+    previous_time = now;
+
+    // --- 1. READ SENSORS ---
+    sensors_event_t event;
+    
+    // Temp
+    dht.temperature().getEvent(&event);
+    temp = isnan(event.temperature) ? 25.0 : event.temperature; // Fallback to 25 if error
+    
+    // Humidity
+    dht.humidity().getEvent(&event);
+    hum = isnan(event.relative_humidity) ? 50.0 : event.relative_humidity; // Fallback to 50 if error
+    
+    // Dust & Turbidity (Analog Reads)
+    int dustVal = analogRead(DUST_PIN);
+    int turbVal = analogRead(TURB);
+
+    // --- 2. EVALUATE THRESHOLDS ---
+    String tempColor = "green";
+    if (temp >= 35.0) tempColor = "red";
+    else if (temp <= 18.0) tempColor = "bred";
+
+    String humColor = "green";
+    if (hum >= 80.0) humColor = "blue";
+    else if (hum <= 40.0) humColor = "bblue";
+
+    String dustColor = "green";
+    // NOTE: Adjust '150' based on your actual dust sensor calibration
+    if (dustVal >= 150) dustColor = "yellow"; 
+
+    String turbColor = "green";
+    // NOTE: Adjust '2000' based on your actual turbidity sensor calibration
+    if (turbVal >= 2000) turbColor = "orange"; 
+
+    // --- 3. CONSTRUCT JSON PAYLOAD ---
+    String jsonPayload = "{\"temp\":\"" + tempColor + "\",\"humid\":\"" + humColor + "\",\"dust\":\"" + dustColor + "\",\"turbidity\":\"" + turbColor + "\"}";
+
+    // --- 4. PUBLISH TO MQTT ---
+    Serial.print("PUBLISHING: ");
+    Serial.println(jsonPayload);
+    
+    mqttClient.publish(topic, jsonPayload.c_str());
+  }
+}
