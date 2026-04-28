@@ -12,17 +12,16 @@
 #define SERVO_PIN D2
 #define LED_PIN D3
 #define NUM_LEDS 16
-#define DUST_PIN D8 // Assuming analog sensor
+#define DUST_PIN D8 
 #define OLED_SDA D4
 #define OLED_SCL D5
-#define TURB D7     // Assuming analog sensor
+#define TURB D7     
 
 // DHT parameters
 #define DHTTYPE DHT22
 DHT_Unified dht(DHTPIN, DHTTYPE);
-uint32_t delayMS;
 float temp, hum;
-const long interval = 5000; // Increased to 5 seconds to prevent MQTT spam
+const long interval = 5000; // Publish every 5 seconds
 
 // Servo motor
 Servo servo;
@@ -30,52 +29,44 @@ Servo servo;
 // WS2812 LED strip
 CRGB leds[NUM_LEDS];
 
+// Global variables to store current color states for the NeoPixels
+String currentTempColor = "green";
+String currentHumColor = "green";
+String currentDustColor = "green";
+String currentTurbColor = "green";
+
 // Wi-Fi credentials
 const char* ssid = "Wokwi-GUEST";
 const char* password = "";
 
-// MQTT broker details private
+// MQTT broker details
 const char* mqtt_broker = "96d3e4027caf4bef8208fd85b4556562.s1.eu.hivemq.cloud";
 const int mqtt_port = 8883;
 const char* mqtt_username = "helloworld";
 const char* mqtt_password = "Hello2world";
-const char* topic = "Tempdata"; // Publish topic
+const char* topic = "Tempdata"; 
 
 // Create instances
 WiFiClientSecure wifiClient;
 PubSubClient mqttClient(wifiClient);
 
-// Variables for timing
 long previous_time = 0;
 
-// Callback function to handler incoming messages
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("]: ");
   String message;
   for (int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
-  Serial.println(message);
-
+  
   if (String(topic) == "lights") {
-    if (message == "ON") {
-      digitalWrite(LED, HIGH);
-    } else {
-      digitalWrite(LED, LOW);
-    }
+    if (message == "ON") digitalWrite(LED, HIGH);
+    else digitalWrite(LED, LOW);
   }
   else if (String(topic) == "servo") {
     int degree = message.toInt();
     servo.write(degree);
   }
-  else if (String(topic) == "lights/neopixel") {
-    int red, green, blue;
-    sscanf(message.c_str(), "%d,%d,%d", &red, &green, &blue); 
-    fill_solid(leds, NUM_LEDS, CRGB(red, green, blue)); 
-    FastLED.show(); 
-  }
+  // The "lights/neopixel" MQTT callback is kept here if you want to override it manually later
 }
 
 void setupMQTT(){
@@ -85,100 +76,131 @@ void setupMQTT(){
 
 void reconnect(){
   while (!mqttClient.connected()){
-    Serial.println("Reconnecting to MQTT Broker...");
+    Serial.println("Reconnecting to MQTT...");
     String clientId = "ESP32Client-";
     clientId += String(random(0xffff),HEX);
 
     if (mqttClient.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
-      Serial.println("Connected to MQTT Broker.");
-      mqttClient.subscribe(topic);
       mqttClient.subscribe("lights");
       mqttClient.subscribe("servo");
       mqttClient.subscribe("lights/neopixel");
     } else {
-      Serial.print("Failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
       delay(5000);
     }
   }
 }
 
+// --- HELPER FUNCTION: Convert String to FastLED Color (With Blinking) ---
+CRGB getColorFromString(String colorStr) {
+  // This creates a 1Hz blink effect without using delay()
+  bool isBlinkOn = (millis() % 1000) < 500; 
+
+  if (colorStr == "red")    return CRGB::Red;
+  if (colorStr == "bred")   return isBlinkOn ? CRGB::Red : CRGB::Black;
+  if (colorStr == "blue")   return CRGB::Blue;
+  if (colorStr == "bblue")  return isBlinkOn ? CRGB::Blue : CRGB::Black;
+  if (colorStr == "yellow") return CRGB::Yellow;
+  if (colorStr == "orange") return CRGB::Orange;
+  if (colorStr == "green")  return CRGB::Green;
+  
+  return CRGB::Black; // Safe default
+}
+
+// --- HELPER FUNCTION: Update the 4 Physical LED Segments ---
+void updatePhysicalLEDs() {
+  CRGB tempC = getColorFromString(currentTempColor);
+  CRGB humC  = getColorFromString(currentHumColor);
+  CRGB dustC = getColorFromString(currentDustColor);
+  CRGB turbC = getColorFromString(currentTurbColor);
+
+  // Segment 1: Temperature (LEDs 0 to 3)
+  for(int i = 0; i < 4; i++) leds[i] = tempC;
+  
+  // Segment 2: Humidity (LEDs 4 to 7)
+  for(int i = 4; i < 8; i++) leds[i] = humC;
+  
+  // Segment 3: Dust (LEDs 8 to 11)
+  for(int i = 8; i < 12; i++) leds[i] = dustC;
+  
+  // Segment 4: Turbidity (LEDs 12 to 15)
+  for(int i = 12; i < 16; i++) leds[i] = turbC;
+
+  FastLED.show();
+}
+
 void setup() {
   Serial.begin(115200);
-  
   pinMode(LED, OUTPUT);
-  digitalWrite(LED, LOW);
-  
   pinMode(DUST_PIN, INPUT);
   pinMode(TURB, INPUT);
   
   dht.begin();
-
   servo.attach(SERVO_PIN, 500, 2400);
   servo.write(0);
-
+  
+  // Initialize FastLED
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.setBrightness(50); // Set to 50 to prevent blinding/power spikes
 
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
+  while (WiFi.status() != WL_CONNECTED) { delay(500); }
   
   wifiClient.setInsecure(); 
   setupMQTT();
 }
 
 void loop() {
-  if (!mqttClient.connected()){
-    reconnect();
-  }
+  if (!mqttClient.connected()) reconnect();
   mqttClient.loop();
 
+  // 1. Constantly update the physical LEDs (Required for smooth blinking animation)
+  updatePhysicalLEDs();
+
+  // 2. Read sensors and publish ONLY every 5 seconds
   long now = millis();
   if (now - previous_time > interval) { 
     previous_time = now;
 
-    // --- 1. READ SENSORS ---
+    // Read Sensors
     sensors_event_t event;
-    
-    // Temp
     dht.temperature().getEvent(&event);
-    temp = isnan(event.temperature) ? 25.0 : event.temperature; // Fallback to 25 if error
+    temp = isnan(event.temperature) ? 25.0 : event.temperature; 
     
-    // Humidity
     dht.humidity().getEvent(&event);
-    hum = isnan(event.relative_humidity) ? 50.0 : event.relative_humidity; // Fallback to 50 if error
+    hum = isnan(event.relative_humidity) ? 50.0 : event.relative_humidity; 
     
-    // Dust & Turbidity (Analog Reads)
     int dustVal = analogRead(DUST_PIN);
     int turbVal = analogRead(TURB);
 
-    // --- 2. EVALUATE THRESHOLDS ---
-    String tempColor = "green";
-    if (temp >= 35.0) tempColor = "red";
-    else if (temp <= 18.0) tempColor = "bred";
+    // Evaluate Colors (Now updating the GLOBAL variables)
+    currentTempColor = "green";
+    if (temp >= 35.0) currentTempColor = "red";
+    else if (temp <= 18.0) currentTempColor = "bred";
 
-    String humColor = "green";
-    if (hum >= 80.0) humColor = "blue";
-    else if (hum <= 40.0) humColor = "bblue";
+    currentHumColor = "green";
+    if (hum >= 80.0) currentHumColor = "blue";
+    else if (hum <= 40.0) currentHumColor = "bblue";
 
-    String dustColor = "green";
-    // NOTE: Adjust '150' based on your actual dust sensor calibration
-    if (dustVal >= 150) dustColor = "yellow"; 
+    currentDustColor = "green";
+    if (dustVal >= 150) currentDustColor = "yellow"; 
 
-    String turbColor = "green";
-    // NOTE: Adjust '2000' based on your actual turbidity sensor calibration
-    if (turbVal >= 2000) turbColor = "orange"; 
+    currentTurbColor = "green";
+    if (turbVal >= 2000) currentTurbColor = "orange"; 
 
-    // --- 3. CONSTRUCT JSON PAYLOAD ---
-    String jsonPayload = "{\"temp\":\"" + tempColor + "\",\"humid\":\"" + humColor + "\",\"dust\":\"" + dustColor + "\",\"turbidity\":\"" + turbColor + "\"}";
+    // Construct the comprehensive JSON payload
+    String jsonPayload = "{";
+    jsonPayload += "\"temperature\":" + String(temp) + ",";
+    jsonPayload += "\"humidity\":" + String(hum) + ",";
+    jsonPayload += "\"dust\":" + String(dustVal) + ",";
+    jsonPayload += "\"turbidity\":" + String(turbVal) + ",";
+    jsonPayload += "\"color_temp\":\"" + currentTempColor + "\",";
+    jsonPayload += "\"color_humid\":\"" + currentHumColor + "\",";
+    jsonPayload += "\"color_dust\":\"" + currentDustColor + "\",";
+    jsonPayload += "\"color_turb\":\"" + currentTurbColor + "\"";
+    jsonPayload += "}";
 
-    // --- 4. PUBLISH TO MQTT ---
-    Serial.print("PUBLISHING: ");
+    // Publish
     Serial.println(jsonPayload);
-    
     mqttClient.publish(topic, jsonPayload.c_str());
   }
 }
