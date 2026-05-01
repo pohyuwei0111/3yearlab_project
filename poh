@@ -40,7 +40,7 @@ const char* ssid = "Wokwi-GUEST";
 const char* password = "";
 
 // MQTT broker details
-const char* mqtt_broker = "96d3e4027caf4bef8208fd85b4556562.s1.eu.hivemq.cloud";
+const char* mqtt_broker = "check node";
 const int mqtt_port = 8883;
 const char* mqtt_username = "helloworld";
 const char* mqtt_password = "Hello2world";
